@@ -1,0 +1,51 @@
+# Sanskrit Processing
+vidyut>=0.3.0
+indic-transliteration>=2.3.0
+
+# AI / ML
+langchain>=0.2.0
+langchain-community>=0.2.0
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+peft>=0.10.0
+datasets>=2.19.0
+torch>=2.2.0
+
+# Vector Databases
+chromadb>=0.5.0
+pinecone-client>=4.0.0
+
+# Graph Database
+py2neo>=2021.2.4
+
+# Relational Database
+supabase>=2.4.0
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+upstash-redis>=1.0.0
+
+# Data
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+arxiv>=2.1.0
+lxml>=5.2.0
+
+# Visualization
+plotly>=5.21.0
+networkx>=3.3.0
+pyvis>=0.3.2
+umap-learn>=0.5.6
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# Utilities
+tqdm>=4.66.0
+loguru>=0.7.0
+httpx>=0.27.0
+internetarchive>=4.0.0
