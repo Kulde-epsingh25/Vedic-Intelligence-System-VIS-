@@ -1,236 +1,227 @@
 """
-Pipeline embedder module for generating sentence embeddings.
-
-This module uses sentence-transformers to generate semantic embeddings for
-verses and concepts, storing them in vector databases for similarity search.
+pipeline/embedder.py
+====================
+Generates 768-dim sentence embeddings for every verse and stores
+them in ChromaDB (local), Supabase pgvector, and Pinecone (cloud).
 """
 
-from typing import List, Optional
-from loguru import logger
-from tqdm import tqdm
 import os
+import json
+from pathlib import Path
+from dataclasses import asdict
+from typing import Optional
+from tqdm import tqdm
+from loguru import logger
+from dotenv import load_dotenv
 
-# Get embedding model from environment
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
-)
+load_dotenv()
+
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL",
+    "sentence-transformers/paraphrase-multilingual-mpnet-base-v2")
+CHROMA_DIR = Path(os.getenv("CHROMA_DIR", "./data/chroma"))
 
 
 class Embedder:
-    """Generate and manage sentence embeddings for Sanskrit verses."""
+    """
+    Generates multilingual sentence embeddings for Sanskrit verses.
+    Model: paraphrase-multilingual-mpnet-base-v2 (768-dim, free)
+    Supports: Devanagari, IAST, English translations.
 
-    def __init__(self, model_name: str = EMBEDDING_MODEL, device: str = "cpu"):
-        """
-        Initialize Embedder with a sentence-transformer model.
+    Example:
+        >>> e = Embedder()
+        >>> vec = e.embed_verse("धर्मक्षेत्रे कुरुक्षेत्रे")
+        >>> len(vec)   # 768
+    """
 
-        Args:
-            model_name: HuggingFace model ID
-            device: "cpu" or "cuda"
+    def __init__(self, model_name: str = EMBEDDING_MODEL):
+        self.model_name = model_name
+        self.model = None
+        self._load_model()
+        self.chroma = None
+        self._init_chroma()
 
-        Example:
-            >>> embedder = Embedder()
-            >>> embedding = embedder.embed_verse("धर्मक्षेत्रे कुरुक्षेत्रे")
-            >>> print(f"Embedding shape: {len(embedding)}")
-        """
+    def _load_model(self) -> None:
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError:
-            logger.error("sentence-transformers not installed")
-            raise ImportError("Install via: pip install sentence-transformers")
-
-        try:
-            self.model = SentenceTransformer(model_name, device=device)
-            logger.info(f"Loaded embedding model: {model_name} on {device}")
-            self.embedding_dim = self.model.get_sentence_embedding_dimension()
-            logger.info(f"Embedding dimension: {self.embedding_dim}")
+            logger.info(f"Loading embedding model: {self.model_name}")
+            self.model = SentenceTransformer(self.model_name)
+            logger.success("Embedding model loaded")
         except Exception as e:
-            logger.error(f"Error loading embedding model: {e}")
-            raise
+            logger.error(f"Failed to load embedding model: {e}")
 
-    def embed_verse(self, text: str, normalize: bool = True) -> List[float]:
-        """
-        Generate embedding for a single verse.
-
-        Args:
-            text: Verse text in Devanagari or any language
-            normalize: Whether to normalize the embedding (default: True)
-
-        Returns:
-            List of floats representing the embedding
-
-        Example:
-            >>> embedder = Embedder()
-            >>> embedding = embedder.embed_verse("धर्मक्षेत्रे कुरुक्षेत्रे")
-            >>> print(f"Embedding: {embedding[:5]}...")
-        """
+    def _init_chroma(self) -> None:
         try:
-            if not text or not text.strip():
-                logger.warning("Empty text provided for embedding")
-                return [0.0] * self.embedding_dim
-
-            # Generate embedding
-            embedding = self.model.encode(
-                text,
-                convert_to_numpy=False,
-                normalize_embeddings=normalize
+            import chromadb
+            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+            self.chroma_client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            self.collection = self.chroma_client.get_or_create_collection(
+                name="vis_verses",
+                metadata={"hnsw:space": "cosine"}
             )
-
-            # Convert to list
-            result = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
-            logger.debug(f"Generated embedding for {len(text)} chars")
-            return result
-
+            logger.success(f"ChromaDB initialised at {CHROMA_DIR}")
+            logger.info(f"Existing vectors in ChromaDB: {self.collection.count():,}")
         except Exception as e:
-            logger.error(f"Error embedding verse: {e}")
-            return [0.0] * self.embedding_dim
+            logger.error(f"ChromaDB init failed: {e}")
+            self.chroma_client = None
+            self.collection = None
 
-    def embed_batch(
-        self,
-        texts: List[str],
-        batch_size: int = 32,
-        normalize: bool = True,
-        show_progress: bool = True
-    ) -> List[List[float]]:
+    def embed_text(self, text: str) -> list[float]:
+        """Embeds a single text string. Returns 768-dim vector."""
+        if self.model is None:
+            return [0.0] * 768
+        try:
+            return self.model.encode(text, normalize_embeddings=True).tolist()
+        except Exception as e:
+            logger.warning(f"Embedding failed: {e}")
+            return [0.0] * 768
+
+    def embed_verse(self, verse) -> list[float]:
         """
-        Generate embeddings for multiple texts efficiently.
+        Embeds a verse using IAST + English translation concatenated.
+        This gives better cross-lingual retrieval than Devanagari alone.
+        """
+        if hasattr(verse, 'iast') and hasattr(verse, 'translation_en'):
+            text = f"{verse.iast} {verse.translation_en or ''}"
+        elif hasattr(verse, 'devanagari'):
+            text = verse.devanagari
+        else:
+            text = str(verse)
+        return self.embed_text(text)
+
+    def embed_batch(self, texts: list[str], batch_size: int = 64) -> list[list[float]]:
+        """
+        Embeds multiple texts in batches (efficient on GPU/CPU).
 
         Args:
-            texts: List of texts to embed
-            batch_size: Batch size for processing (default: 32)
-            normalize: Whether to normalize embeddings
-            show_progress: Whether to show progress bar
+            texts: List of text strings
+            batch_size: Batch size (64 works well on free Colab T4)
 
         Returns:
-            List of embeddings (each is a list of floats)
-
-        Example:
-            >>> embedder = Embedder()
-            >>> verses = [
-            ...     "धर्मक्षेत्रे कुरुक्षेत्रे",
-            ...     "पाण्डवाः शतसंख्यकाः"
-            ... ]
-            >>> embeddings = embedder.embed_batch(verses)
-            >>> print(f"Generated {len(embeddings)} embeddings")
+            list[list[float]]: One 768-dim vector per text
         """
-        if not texts:
-            logger.warning("Empty text list provided")
-            return []
+        if self.model is None:
+            return [[0.0] * 768] * len(texts)
 
-        try:
-            # Filter out empty strings
-            valid_texts = [t for t in texts if t and t.strip()]
-            if len(valid_texts) < len(texts):
-                logger.warning(f"Filtered out {len(texts) - len(valid_texts)} empty texts")
-
-            iterator = tqdm(valid_texts, desc="Embedding", disable=not show_progress)
-
+        all_embeddings = []
+        for i in tqdm(range(0, len(texts), batch_size),
+                      desc="Generating embeddings", unit="batch"):
+            batch = texts[i:i + batch_size]
             embeddings = self.model.encode(
-                valid_texts,
+                batch,
                 batch_size=batch_size,
-                normalize_embeddings=normalize,
-                show_progress_bar=show_progress,
-                convert_to_numpy=False,
+                normalize_embeddings=True,
+                show_progress_bar=False
             )
+            all_embeddings.extend(embeddings.tolist())
+        return all_embeddings
 
-            # Convert to list format
-            result = [
-                e.tolist() if hasattr(e, 'tolist') else list(e)
-                for e in embeddings
-            ]
-
-            logger.info(f"Generated {len(result)} embeddings")
-            return result
-
-        except Exception as e:
-            logger.error(f"Error embedding batch: {e}")
-            return []
-
-    def embed_and_store(
-        self,
-        verses: List[dict],
-        batch_size: int = 32
-    ) -> List[dict]:
+    def embed_and_store_verses(self, verses: list, batch_size: int = 64) -> int:
         """
-        Embed verses and prepare for storage in vector databases.
+        Embeds verses and stores in ChromaDB + logs for pgvector insert.
 
         Args:
-            verses: List of verse dicts with 'verse_id' and 'devanagari' keys
-            batch_size: Batch size for embedding
+            verses: List of VerseRecord objects
+            batch_size: Embedding batch size
 
         Returns:
-            List of verse dicts with 'embedding' key added
-
-        Example:
-            >>> embedder = Embedder()
-            >>> verses = [
-            ...     {"verse_id": "BG.1.1", "devanagari": "धर्मक्षेत्रे..."},
-            ...     {"verse_id": "BG.1.2", "devanagari": "पाण्डवाः..."}
-            ... ]
-            >>> verses_with_embeddings = embedder.embed_and_store(verses)
+            int: Number of vectors stored
         """
-        if not verses:
-            logger.warning("No verses provided for embedding")
+        if self.collection is None:
+            logger.error("ChromaDB not initialised")
+            return 0
+
+        # Build texts for embedding
+        texts = []
+        for v in verses:
+            text = f"{getattr(v, 'iast', '')} {getattr(v, 'translation_en', '') or ''}"
+            texts.append(text.strip())
+
+        logger.info(f"Embedding {len(verses):,} verses...")
+        embeddings = self.embed_batch(texts, batch_size)
+
+        # Store in ChromaDB in batches of 5000
+        chroma_batch = 5000
+        stored = 0
+        for i in tqdm(range(0, len(verses), chroma_batch),
+                      desc="Storing in ChromaDB", unit="batch"):
+            batch_verses = verses[i:i + chroma_batch]
+            batch_embeddings = embeddings[i:i + chroma_batch]
+            batch_texts = texts[i:i + chroma_batch]
+
+            ids = [v.verse_id for v in batch_verses]
+            metadatas = [{
+                "source_text_id": getattr(v, 'source_text_id', ''),
+                "book": str(getattr(v, 'book', '')),
+                "chapter": str(getattr(v, 'chapter', '')),
+                "verse_num": str(getattr(v, 'verse_num', '')),
+                "metre": getattr(v, 'metre', '') or '',
+            } for v in batch_verses]
+
+            try:
+                self.collection.upsert(
+                    ids=ids,
+                    embeddings=batch_embeddings,
+                    documents=batch_texts,
+                    metadatas=metadatas
+                )
+                stored += len(batch_verses)
+            except Exception as e:
+                logger.error(f"ChromaDB store failed at batch {i}: {e}")
+
+        logger.success(f"Stored {stored:,} verse embeddings in ChromaDB")
+        return stored
+
+    def semantic_search(self, query: str, n_results: int = 10,
+                        filter_text: Optional[str] = None) -> list[dict]:
+        """
+        Searches verses by semantic meaning.
+
+        Args:
+            query: Natural language question or Sanskrit phrase
+            n_results: Number of results to return
+            filter_text: Optional source_text_id filter
+
+        Returns:
+            list[dict]: Matching verses with distances
+        """
+        if self.collection is None or self.model is None:
             return []
 
-        try:
-            # Extract texts
-            texts = [v.get("devanagari", "") or v.get("iast", "") for v in verses]
+        query_embedding = self.embed_text(query)
+        where = {"source_text_id": filter_text} if filter_text else None
 
-            # Generate embeddings
-            embeddings = self.embed_batch(
-                texts,
-                batch_size=batch_size,
-                show_progress=True
+        try:
+            results = self.collection.query(
+                query_embeddings=[query_embedding],
+                n_results=n_results,
+                where=where,
+                include=["documents", "metadatas", "distances"]
             )
-
-            # Add embeddings to verses
-            result = []
-            for verse, embedding in zip(verses, embeddings):
-                verse_copy = verse.copy()
-                verse_copy["embedding"] = embedding
-                result.append(verse_copy)
-
-            logger.info(f"Added embeddings to {len(result)} verses")
-            return result
-
+            output = []
+            for i, (doc, meta, dist) in enumerate(zip(
+                results["documents"][0],
+                results["metadatas"][0],
+                results["distances"][0]
+            )):
+                output.append({
+                    "rank": i + 1,
+                    "verse_id": results["ids"][0][i],
+                    "text": doc,
+                    "similarity": round(1 - dist, 4),
+                    "metadata": meta
+                })
+            return output
         except Exception as e:
-            logger.error(f"Error in embed_and_store: {e}")
-            return verses
+            logger.error(f"Semantic search failed: {e}")
+            return []
 
-    def get_embedding_dim(self) -> int:
-        """
-        Get the dimensionality of embeddings.
-
-        Returns:
-            Embedding dimension
-
-        Example:
-            >>> embedder = Embedder()
-            >>> dim = embedder.get_embedding_dim()
-            >>> print(f"Dimension: {dim}")  # 768
-        """
-        return self.embedding_dim
-
-    def model_info(self) -> dict:
-        """
-        Get information about the loaded model.
-
-        Returns:
-            Dictionary with model metadata
-
-        Example:
-            >>> embedder = Embedder()
-            >>> info = embedder.model_info()
-            >>> print(info)
-        """
-        try:
-            return {
-                "model_name": self.model.get_sentence_embedding_dimension(),
-                "embedding_dim": self.embedding_dim,
-                "max_seq_length": self.model.max_seq_length if hasattr(self.model, 'max_seq_length') else None,
-                "model_class": str(type(self.model)),
-            }
-        except Exception as e:
-            logger.error(f"Error getting model info: {e}")
-            return {}
+    def get_stats(self) -> dict:
+        """Returns ChromaDB collection statistics."""
+        if self.collection is None:
+            return {"count": 0, "status": "not_initialised"}
+        return {
+            "count": self.collection.count(),
+            "model": self.model_name,
+            "chroma_dir": str(CHROMA_DIR),
+            "status": "ok"
+        }

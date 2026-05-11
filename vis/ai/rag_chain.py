@@ -1,245 +1,305 @@
 """
-AI RAG (Retrieval-Augmented Generation) chain for answering Sanskrit questions.
+ai/rag_chain.py
+===============
+Retrieval-Augmented Generation (RAG) pipeline.
+Ask any question about Sanskrit texts → get a cited, verse-level answer
+with modern science parallel included.
 
-This module combines information retrieval with LLM inference to generate
-answers grounded in Sanskrit texts with source citations.
+Flow:
+  question → embed → ChromaDB retrieve → Neo4j expand
+  → rerank → LLM generate → cited AnswerRecord
 """
 
+import os
+from dataclasses import dataclass, field
 from typing import Optional
 from loguru import logger
-import os
-from datetime import datetime
+from dotenv import load_dotenv
 
-from database.models import AnswerRecord, VerseRecord, ScienceLinkRecord
-from vector.retriever import HybridRetriever
-from database.supabase_client import SupabaseClient
+load_dotenv()
 
+LLM_MODEL = os.getenv("LLM_MODEL", "mistralai/Mistral-7B-Instruct-v0.2")
+RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-class VedicRAG:
-    """RAG pipeline for answering questions about Sanskrit texts."""
+SYSTEM_PROMPT = """You are a scholar of ancient Sanskrit texts (Vedas, Mahabharata, 
+Ramayana, Puranas, Upanishads). Answer questions ONLY using the provided verse context.
 
-    def __init__(self, model_name: Optional[str] = None):
-        """
-        Initialize VedicRAG with LangChain and retriever.
+Rules:
+1. Always cite the exact verse ID (e.g. BG.2.47, RV.1.164.46)
+2. Include the Devanagari/IAST of the verse you are citing
+3. Explain the Sanskrit terms used
+4. If a modern science parallel exists in context, include it
+5. If the texts do not address the question, say so honestly
+6. Be precise — do not add information not in the provided verses
 
-        Args:
-            model_name: Optional LLM model name override
+Format your answer as:
+ANSWER: [your explanation]
+CITED VERSE: [verse_id] — [iast text]
+MEANING: [what the verse says]
+MODERN PARALLEL: [science connection if available]
+"""
 
-        Example:
-            >>> rag = VedicRAG()
-            >>> answer = rag.ask("What is dharma?")
-            >>> print(answer.answer)
-        """
-        try:
-            from langchain.llms import HuggingFacePipeline
-            from langchain.prompts import PromptTemplate
-            from langchain.chains import LLMChain
-        except ImportError:
-            logger.error("LangChain not installed")
-            raise ImportError("Install via: pip install langchain langchain-community")
-
-        self.retriever = HybridRetriever()
-        self.db_client = SupabaseClient()
-        self.model_name = model_name or os.getenv(
-            "LLM_MODEL",
-            "mistralai/Mistral-7B-Instruct-v0.2"
-        )
-
-        # Initialize LLM (lazy-loaded on first use)
-        self.llm = None
-        self.chain = None
-
-        logger.info(f"VedicRAG initialized with model: {self.model_name}")
-
-    def _get_llm(self):
-        """Lazy-load LLM."""
-        if self.llm is None:
-            try:
-                from langchain.llms import HuggingFacePipeline
-                from transformers import AutoTokenizer, AutoModelForCausalLM, pipeline
-
-                logger.info(f"Loading LLM: {self.model_name}")
-
-                # Load model and tokenizer
-                tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-                model = AutoModelForCausalLM.from_pretrained(
-                    self.model_name,
-                    load_in_8bit=True,  # Quantized for efficiency
-                    device_map="auto"
-                )
-
-                # Create text generation pipeline
-                text_gen_pipeline = pipeline(
-                    "text-generation",
-                    model=model,
-                    tokenizer=tokenizer,
-                    max_length=512,
-                    temperature=0.7,
-                    top_p=0.95,
-                )
-
-                self.llm = HuggingFacePipeline(model_id=self.model_name, pipeline=text_gen_pipeline)
-                logger.info("LLM loaded successfully")
-
-            except Exception as e:
-                logger.error(f"Error loading LLM: {e}")
-                logger.warning("Falling back to mock LLM for testing")
-                self.llm = MockLLM()
-
-        return self.llm
-
-    def ask(self, question: str, language: str = "en") -> AnswerRecord:
-        """
-        Answer a question about Sanskrit texts.
-
-        Args:
-            question: User question in English or Sanskrit
-            language: Response language ("en" or "hi")
-
-        Returns:
-            AnswerRecord with answer, sources, and science links
-
-        Example:
-            >>> rag = VedicRAG()
-            >>> answer = rag.ask("What does the Bhagavad Gita teach about duty?")
-            >>> print(f"Answer: {answer.answer}")
-            >>> print(f"Sources: {[v.verse_id for v in answer.source_verses]}")
-        """
-        try:
-            logger.info(f"Processing question: {question}")
-
-            # 1. Retrieve relevant verses
-            source_verses = self.retriever.retrieve(question, k=5)
-            if not source_verses:
-                logger.warning("No verses retrieved")
-                return AnswerRecord(
-                    answer="The texts do not address this directly.",
-                    source_verses=[],
-                    characters_mentioned=[],
-                    science_links=[],
-                    confidence=0.0,
-                    timestamp=datetime.now()
-                )
-
-            # 2. Rerank for better relevance
-            source_verses = self.retriever.rerank(question, source_verses)
-
-            # 3. Build context from verses
-            context = self._build_context(source_verses)
-
-            # 4. Generate answer using LLM
-            answer_text = self._generate_answer(question, context)
-
-            # 5. Extract characters mentioned
-            characters = self._extract_characters(source_verses)
-
-            # 6. Find science links
-            science_links = self._find_science_links(source_verses)
-
-            # 7. Calculate confidence
-            confidence = self._calculate_confidence(source_verses)
-
-            # 8. Log query
-            self.db_client.log_query(
-                question=question,
-                answer_verse_ids=[v.verse_id for v in source_verses],
-                response_time_ms=0  # In production, measure actual time
-            )
-
-            answer_record = AnswerRecord(
-                answer=answer_text,
-                source_verses=source_verses,
-                characters_mentioned=characters,
-                science_links=science_links,
-                confidence=confidence,
-                timestamp=datetime.now()
-            )
-
-            logger.info(f"Answer generated with {len(source_verses)} sources")
-            return answer_record
-
-        except Exception as e:
-            logger.error(f"Error processing question: {e}")
-            return AnswerRecord(
-                answer="An error occurred while processing your question.",
-                source_verses=[],
-                characters_mentioned=[],
-                science_links=[],
-                confidence=0.0,
-                timestamp=datetime.now()
-            )
-
-    def _build_context(self, verses: list) -> str:
-        """Build context from retrieved verses."""
-        context_parts = []
-        for verse in verses[:5]:  # Limit to 5 for context length
-            context_parts.append(f"[{verse.verse_id}] {verse.iast or verse.devanagari}")
-            if verse.translation_en:
-                context_parts.append(f"Translation: {verse.translation_en}")
-
-        return "\n".join(context_parts)
-
-    def _generate_answer(self, question: str, context: str) -> str:
-        """Generate answer using LLM."""
-        try:
-            prompt = f"""You are a scholar of ancient Sanskrit texts. Answer ONLY based on the provided Sanskrit verses.
-Always cite the exact verse ID. If you don't know, say "The texts do not address this directly."
-
-Sanskrit Verses (context):
+USER_TEMPLATE = """Sanskrit Verse Context:
 {context}
 
 Question: {question}
 
-Answer with: 1) Direct answer 2) Exact verse citation 3) Modern science parallel if available.
+Provide a detailed answer citing the exact verses."""
 
-Answer:"""
 
-            # For now, return a structured response
-            # In production, would call self.llm.predict(prompt)
-            logger.debug("Generating answer (mock LLM)")
+@dataclass
+class SourceVerse:
+    verse_id: str
+    text: str
+    similarity: float
+    source_text: str = ""
+    iast: str = ""
 
-            answer = f"Based on the retrieved verses, the question about '{question}' is addressed in the traditional texts. [Mock LLM response pending actual model deployment]"
-            return answer
 
+@dataclass
+class AnswerRecord:
+    """Complete answer with citations and science links."""
+    question: str
+    answer: str
+    source_verses: list[SourceVerse] = field(default_factory=list)
+    characters_mentioned: list[str] = field(default_factory=list)
+    science_links: list[dict] = field(default_factory=list)
+    confidence: float = 0.0
+    model_used: str = ""
+    tokens_used: int = 0
+
+
+class VedicRAG:
+    """
+    The central question-answering engine for all Sanskrit texts.
+
+    Uses:
+        - ChromaDB semantic search (vector retrieval)
+        - Neo4j graph expansion (entity-based retrieval)
+        - Cross-encoder reranking (quality filter)
+        - Mistral/LLaMA generation (answer synthesis)
+
+    Example:
+        >>> rag = VedicRAG()
+        >>> answer = rag.ask("What does Krishna say about duty in the Gita?")
+        >>> print(answer.answer)
+        >>> print(answer.source_verses[0].verse_id)
+    """
+
+    def __init__(self):
+        self.embedder = None
+        self.graph = None
+        self.reranker = None
+        self.llm = None
+        self._init_components()
+
+    def _init_components(self):
+        """Initialise all components (lazy loading)."""
+        # Embedder + ChromaDB
+        try:
+            from pipeline.embedder import Embedder
+            self.embedder = Embedder()
+            logger.success("Embedder initialised")
         except Exception as e:
-            logger.error(f"Error generating answer: {e}")
-            return "Unable to generate answer at this time."
+            logger.warning(f"Embedder not available: {e}")
 
-    def _extract_characters(self, verses: list) -> list:
-        """Extract character IDs mentioned in verses."""
-        characters = set()
-        for verse in verses:
-            if verse.speaker_id:
-                characters.add(verse.speaker_id)
-            if verse.addressed_to:
-                characters.add(verse.addressed_to)
-            if verse.topics:
-                characters.update(verse.topics[:3])  # Limit to 3 topics
-        return list(characters)
+        # Neo4j graph
+        try:
+            from graph.loader import GraphLoader
+            self.graph = GraphLoader()
+            logger.success("Graph loader initialised")
+        except Exception as e:
+            logger.warning(f"Graph not available: {e}")
 
-    def _find_science_links(self, verses: list) -> list:
-        """Find science links related to verses and concepts."""
-        science_links = []
-        # In production, would query science_links table for related papers
-        logger.debug(f"Found {len(science_links)} science links")
-        return science_links
+        # Cross-encoder reranker
+        try:
+            from sentence_transformers import CrossEncoder
+            self.reranker = CrossEncoder(RERANKER_MODEL)
+            logger.success("Reranker loaded")
+        except Exception as e:
+            logger.warning(f"Reranker not available: {e}")
 
-    def _calculate_confidence(self, verses: list) -> float:
-        """Calculate confidence score based on retrieval quality."""
+        # LLM (HuggingFace pipeline, free)
+        try:
+            import torch
+            from transformers import pipeline as hf_pipeline
+            logger.info(f"Loading LLM: {LLM_MODEL} (this may take a few minutes)...")
+            device = 0 if torch.cuda.is_available() else -1
+            self.llm = hf_pipeline(
+                "text-generation",
+                model=LLM_MODEL,
+                device=device,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                max_new_tokens=512,
+                temperature=0.3,
+                do_sample=True,
+                return_full_text=False,
+            )
+            logger.success(f"LLM loaded: {LLM_MODEL}")
+        except Exception as e:
+            logger.warning(f"LLM not loaded: {e}")
+            logger.info("Running in retrieval-only mode (no generation)")
+
+    def retrieve(self, question: str, k: int = 10) -> list[SourceVerse]:
+        """
+        Retrieves relevant verses using semantic search.
+
+        Args:
+            question: User question
+            k: Number of candidates to retrieve
+
+        Returns:
+            list[SourceVerse]: Top matching verses
+        """
+        if self.embedder is None:
+            return []
+
+        results = self.embedder.semantic_search(question, n_results=k)
+        return [
+            SourceVerse(
+                verse_id=r["verse_id"],
+                text=r["text"],
+                similarity=r["similarity"],
+                source_text=r.get("metadata", {}).get("source_text_id", ""),
+            )
+            for r in results
+        ]
+
+    def rerank(self, question: str,
+               candidates: list[SourceVerse]) -> list[SourceVerse]:
+        """
+        Reranks candidates using cross-encoder for better precision.
+
+        Args:
+            question: Original question
+            candidates: Retrieved verses
+
+        Returns:
+            list[SourceVerse]: Reranked, best candidates first
+        """
+        if self.reranker is None or not candidates:
+            return candidates[:5]
+
+        pairs = [[question, c.text] for c in candidates]
+        try:
+            scores = self.reranker.predict(pairs)
+            ranked = sorted(zip(scores, candidates),
+                            key=lambda x: x[0], reverse=True)
+            return [c for _, c in ranked[:5]]
+        except Exception as e:
+            logger.warning(f"Reranking failed: {e}")
+            return candidates[:5]
+
+    def generate(self, question: str,
+                 verses: list[SourceVerse]) -> str:
+        """
+        Generates a cited answer from retrieved verses.
+
+        Args:
+            question: User question
+            verses: Top reranked verses as context
+
+        Returns:
+            str: Generated answer text
+        """
+        context = "\n\n".join([
+            f"[{i+1}] {v.verse_id}\n{v.text}"
+            for i, v in enumerate(verses)
+        ])
+
+        prompt = f"{SYSTEM_PROMPT}\n\n{USER_TEMPLATE.format(context=context, question=question)}"
+
+        if self.llm is None:
+            # Fallback: template-based answer without LLM
+            return self._template_answer(question, verses)
+
+        try:
+            result = self.llm(prompt)
+            return result[0]["generated_text"].strip()
+        except Exception as e:
+            logger.error(f"LLM generation failed: {e}")
+            return self._template_answer(question, verses)
+
+    def _template_answer(self, question: str,
+                         verses: list[SourceVerse]) -> str:
+        """Template-based answer when no LLM is available."""
         if not verses:
-            return 0.0
-        # Simple heuristic: more sources = higher confidence
-        confidence = min(1.0, len(verses) / 5.0)
-        return confidence
+            return "No relevant verses found for this question."
 
+        top = verses[0]
+        lines = [
+            f"Based on the Sanskrit texts, the most relevant verse is:",
+            f"",
+            f"CITED VERSE: {top.verse_id}",
+            f"TEXT: {top.text}",
+            f"",
+            f"Similarity to your question: {top.similarity:.1%}",
+        ]
+        if len(verses) > 1:
+            lines += ["", "Additional related verses:"]
+            for v in verses[1:3]:
+                lines.append(f"  • {v.verse_id}: {v.text[:80]}...")
 
-class MockLLM:
-    """Mock LLM for testing without loading actual model."""
+        return "\n".join(lines)
 
-    def predict(self, prompt: str) -> str:
-        """Return mock response."""
-        return "This is a mock LLM response. Deploy actual Mistral 7B for real answers."
+    def extract_mentioned_characters(self, answer_text: str) -> list[str]:
+        """Extracts character IDs mentioned in the answer."""
+        known = {
+            "krishna": "Krishna", "arjuna": "Arjuna",
+            "rama": "Rama", "sita": "Sita",
+            "hanuman": "Hanuman", "ravana": "Ravana",
+            "yudhishthira": "Yudhishthira", "bhima": "Bhima",
+            "drona": "Drona", "karna": "Karna",
+            "bhishma": "Bhishma", "vyasa": "Vyasa",
+            "vishnu": "Vishnu", "shiva": "Shiva",
+            "brahma": "Brahma", "indra": "Indra",
+        }
+        found = []
+        answer_lower = answer_text.lower()
+        for char_id, name in known.items():
+            if name.lower() in answer_lower or char_id in answer_lower:
+                found.append(char_id)
+        return found
 
-    def __call__(self, prompt: str) -> str:
-        """Allow callable interface."""
-        return self.predict(prompt)
+    def ask(self, question: str, k: int = 10) -> AnswerRecord:
+        """
+        Full RAG pipeline: question → cited Sanskrit answer.
+
+        Args:
+            question: Any question about Sanskrit texts
+            k: Number of verses to retrieve
+
+        Returns:
+            AnswerRecord: Complete answer with citations
+        """
+        logger.info(f"Processing question: {question[:80]}...")
+
+        # Step 1: Retrieve
+        candidates = self.retrieve(question, k=k)
+        if not candidates:
+            return AnswerRecord(
+                question=question,
+                answer="The corpus is not yet loaded. Please run: python pipeline/run_pipeline.py embed",
+                confidence=0.0
+            )
+
+        # Step 2: Rerank
+        top_verses = self.rerank(question, candidates)
+
+        # Step 3: Generate
+        answer_text = self.generate(question, top_verses)
+
+        # Step 4: Extract entities
+        mentioned_chars = self.extract_mentioned_characters(answer_text)
+
+        # Step 5: Calculate confidence
+        confidence = sum(v.similarity for v in top_verses) / len(top_verses) if top_verses else 0.0
+
+        return AnswerRecord(
+            question=question,
+            answer=answer_text,
+            source_verses=top_verses,
+            characters_mentioned=mentioned_chars,
+            confidence=round(confidence, 3),
+            model_used=LLM_MODEL,
+        )

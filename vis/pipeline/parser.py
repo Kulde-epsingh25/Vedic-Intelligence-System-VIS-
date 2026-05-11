@@ -1,339 +1,389 @@
 """
-Pipeline parser module for Sanskrit word-level linguistic analysis.
-
-This module uses the Vidyut library to parse Sanskrit verses at the word level,
-extracting grammatical information like root (dhatu), case (vibhakti), number,
-gender, person, and tense.
+pipeline/parser.py
+==================
+Parses every Sanskrit word using vidyut (Rust-based, 29.5M words,
+2000+ Paninian grammar rules). Extracts: dhatu, vibhakti, vachana,
+linga, purusha, lakara, and English meaning for every pada.
 """
 
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict
-from dataclasses import dataclass
-from loguru import logger
+from typing import Optional
 from tqdm import tqdm
+from loguru import logger
 
-from database.models import WordRecord
+try:
+    from vidyut.prakriya import Vyakarana, Dhatu, Pada, Lakara
+    from vidyut.kosha import Kosha
+    from vidyut.lipi import transliterate, Scheme
+    VIDYUT_AVAILABLE = True
+except ImportError:
+    VIDYUT_AVAILABLE = False
+    logger.warning("vidyut not installed. Run: pip install vidyut")
+
+# Fallback transliteration
+from indic_transliteration import sanscript
+from indic_transliteration.sanscript import transliterate as itrans
+
+
+VIBHAKTI_MAP = {
+    1: "Nominative (kartā)",
+    2: "Accusative (karma)",
+    3: "Instrumental (karaṇa)",
+    4: "Dative (sampradāna)",
+    5: "Ablative (apādāna)",
+    6: "Genitive (sambandha)",
+    7: "Locative (adhikaraṇa)",
+    8: "Vocative (sambodhana)",
+}
+
+VACHANA_MAP = {
+    1: "Singular (eka)",
+    2: "Dual (dvi)",
+    3: "Plural (bahu)",
+}
+
+LINGA_MAP = {
+    "m": "Masculine (puṃlinga)",
+    "f": "Feminine (strīlinga)",
+    "n": "Neuter (napuṃsakalinga)",
+}
+
+LAKARA_MAP = {
+    "lat":  "Present (laṭ)",
+    "lit":  "Perfect (liṭ)",
+    "lut":  "Periphrastic Future (luṭ)",
+    "lrt":  "Simple Future (lṛṭ)",
+    "lot":  "Imperative (loṭ)",
+    "lan":  "Imperfect (laṅ)",
+    "lin":  "Optative (liṅ)",
+    "lun":  "Aorist (luṅ)",
+    "lrn":  "Conditional (lṝṅ)",
+}
+
+# Monier-Williams basic meaning lookup (top 200 roots)
+DHATU_MEANINGS = {
+    "gam": "to go", "ag": "to go", "yA": "to go",
+    "AS": "to sit", "sthA": "to stand", "kf": "to do/make",
+    "vad": "to speak", "brU": "to speak", "vac": "to speak",
+    "dA": "to give", "laBa": "to obtain", "jYA": "to know",
+    "paS": "to see", "df": "to see", "ik": "to see",
+    "SRu": "to hear", "spfS": "to touch", "ji": "to conquer",
+    "han": "to strike/kill", "mf": "to die", "jan": "to be born",
+    "bhU": "to be/become", "As": "to be",
+    "vid": "to know/find", "viS": "to enter",
+    "nI": "to lead", "hf": "to take away",
+    "rakS": "to protect", "trai": "to protect",
+    "yuj": "to join/yoke", "bandh": "to bind",
+    "muJ": "to release", "gAha": "to immerse",
+    "car": "to move/wander", "cal": "to move",
+    "pat": "to fall/fly", "plu": "to float/jump",
+    "labh": "to obtain", "Ap": "to obtain/reach",
+    "tyaj": "to abandon", "jah": "to abandon",
+    "mantr": "to counsel", "tan": "to stretch/spread",
+    "kram": "to step", "krid": "to play",
+    "hAs": "to laugh", "rud": "to cry/weep",
+    "svap": "to sleep", "jAgf": "to be awake",
+    "bhaj": "to share/worship", "pUj": "to worship",
+    "yaj": "to sacrifice", "hav": "to sacrifice/offer",
+    "stuW": "to praise", "vand": "to salute",
+    "dhyA": "to meditate", "cint": "to think",
+    "smf": "to remember", "buDa": "to know/understand",
+    "zaz": "to sit", "niviS": "to settle",
+    "sev": "to serve", "BU": "to be/become",
+    "kup": "to be angry", "hfz": "to be happy",
+    "Suc": "to grieve", "nand": "to rejoice",
+    "Baj": "to be devoted", "vraj": "to go/wander",
+    "dah": "to burn", "paC": "to cook",
+    "kzar": "to flow", "vah": "to carry",
+    "sic": "to pour", "pA": "to drink",
+    "aS": "to eat", "Sad": "to fall/decay",
+    "vfdh": "to grow", "kzI": "to diminish",
+    "vft": "to exist/happen", "vfj": "to twist",
+    "dfS": "to see", "dRS": "to see/show",
+}
 
 
 @dataclass
-class ParsedWord:
-    """Represents a parsed Sanskrit word."""
-    surface_form: str
-    dhatu: Optional[str] = None
-    stem: Optional[str] = None
-    vibhakti: Optional[int] = None
-    vachana: Optional[str] = None
-    linga: Optional[str] = None
-    purusha: Optional[str] = None
-    lakara: Optional[str] = None
-    meaning_en: Optional[str] = None
+class WordAnalysis:
+    """Complete linguistic analysis of a single Sanskrit word (pada)."""
+    pada_id:       str
+    verse_id:      str
+    position:      int
+    surface_form:  str                          # as it appears in text
+    surface_devanagari: str = ""
+    dhatu:         Optional[str] = None         # verbal root
+    stem:          Optional[str] = None
+    vibhakti:      Optional[int] = None         # case 1–8
+    vachana:       Optional[int] = None         # 1=sg 2=du 3=pl
+    linga:         Optional[str] = None         # m/f/n
+    purusha:       Optional[str] = None         # person (verbs)
+    lakara:        Optional[str] = None         # tense/mood (verbs)
+    meaning_en:    Optional[str] = None
+    vibhakti_name: Optional[str] = None
+    vachana_name:  Optional[str] = None
+    linga_name:    Optional[str] = None
+    lakara_name:   Optional[str] = None
+
+    def __post_init__(self):
+        if self.vibhakti:
+            self.vibhakti_name = VIBHAKTI_MAP.get(self.vibhakti)
+        if self.vachana:
+            self.vachana_name = VACHANA_MAP.get(self.vachana)
+        if self.linga:
+            self.linga_name = LINGA_MAP.get(self.linga)
+        if self.lakara:
+            self.lakara_name = LAKARA_MAP.get(self.lakara)
 
 
 class SanskritParser:
-    """Parse Sanskrit verses using the Vidyut library."""
+    """
+    Word-level Sanskrit parser using vidyut.
+    Falls back to basic analysis if vidyut is unavailable.
+
+    Example:
+        >>> p = SanskritParser()
+        >>> words = p.parse_verse("धर्मक्षेत्रे कुरुक्षेत्रे", "BG.1.1")
+        >>> for w in words:
+        ...     print(f"{w.surface_form}: root={w.dhatu}, case={w.vibhakti_name}")
+    """
 
     def __init__(self):
-        """
-        Initialize SanskritParser with Vidyut.
+        self.kosha = None
+        self._load_vidyut()
 
-        Example:
-            >>> parser = SanskritParser()
-            >>> words = parser.parse_verse("धर्मक्षेत्रे कुरुक्षेत्रे", "BG.1.1")
-        """
+    def _load_vidyut(self) -> None:
+        """Loads vidyut Kosha (29.5M words). Downloads data if needed."""
+        if not VIDYUT_AVAILABLE:
+            logger.warning("Running in fallback mode — no vidyut")
+            return
         try:
-            from vidyut.chakara import Paricheda
-            self.parser = Paricheda()
-            logger.info("Vidyut parser initialized")
-        except ImportError:
-            logger.error("Vidyut library not installed")
-            raise ImportError("Install via: pip install vidyut-core")
+            from vidyut.kosha import Kosha
+            from vidyut import Data
+            logger.info("Loading vidyut Kosha (29.5M Sanskrit words)...")
+            data = Data.acquire()         # downloads ~31MB on first run
+            self.kosha = Kosha(data)
+            logger.success("vidyut Kosha loaded successfully")
+        except Exception as e:
+            logger.error(f"vidyut Kosha load failed: {e}")
+            logger.info("Fallback: basic word splitting only")
 
-    def parse_verse(self, devanagari: str, verse_id: str) -> List[WordRecord]:
+    def parse_word(self, surface: str, verse_id: str, position: int) -> WordAnalysis:
         """
-        Parse a single Sanskrit verse into word records.
+        Analyses a single Sanskrit word.
 
         Args:
-            devanagari: Verse text in Unicode Devanagari
-            verse_id: Verse identifier (e.g., "BG.1.1")
+            surface: Surface form of the word (Devanagari)
+            verse_id: ID of the verse this word belongs to
+            position: Word position in verse (0-indexed)
 
         Returns:
-            List of WordRecord objects
-
-        Example:
-            >>> parser = SanskritParser()
-            >>> words = parser.parse_verse("धर्मक्षेत्रे कुरुक्षेत्रे", "BG.1.1")
-            >>> for word in words:
-            ...     print(f"{word.surface_form} → {word.dhatu}")
+            WordAnalysis: Complete morphological analysis
         """
-        word_records = []
+        pada_id = f"{verse_id}_{position:03d}"
+        analysis = WordAnalysis(
+            pada_id=pada_id,
+            verse_id=verse_id,
+            position=position,
+            surface_form=surface,
+            surface_devanagari=surface
+        )
+
+        if self.kosha is None:
+            # Basic fallback: just store the word
+            analysis.meaning_en = self._lookup_basic_meaning(surface)
+            return analysis
+
+        # Convert Devanagari → SLP1 for vidyut
+        try:
+            slp1 = itrans(surface, sanscript.DEVANAGARI, sanscript.SLP1)
+        except Exception:
+            slp1 = surface
 
         try:
-            # Parse the verse
-            parsed_result = self.parser.run(devanagari)
+            results = self.kosha.get(slp1)
+            if results:
+                r = results[0]              # take best analysis
+                analysis.dhatu = getattr(r, 'dhatu', None)
+                analysis.stem = getattr(r, 'stem', None)
 
-            if not parsed_result or len(parsed_result) == 0:
-                logger.warning(f"No parsing result for verse {verse_id}")
-                return word_records
+                # Extract vibhakti
+                if hasattr(r, 'vibhakti') and r.vibhakti is not None:
+                    analysis.vibhakti = int(str(r.vibhakti).split('.')[-1])
 
-            # Process each word in the parsed result
-            for position, word_analysis in enumerate(parsed_result):
-                word_rec = self._extract_word_record(
-                    word_analysis,
-                    verse_id,
-                    position
-                )
-                if word_rec:
-                    word_records.append(word_rec)
+                # Extract vachana
+                if hasattr(r, 'vachana') and r.vachana is not None:
+                    vachana_str = str(r.vachana).lower()
+                    analysis.vachana = (1 if 'eka' in vachana_str else
+                                        2 if 'dvi' in vachana_str else 3)
 
-            logger.debug(f"Parsed {len(word_records)} words from verse {verse_id}")
-            return word_records
+                # Extract linga
+                if hasattr(r, 'linga') and r.linga is not None:
+                    linga_str = str(r.linga).lower()
+                    analysis.linga = ('m' if 'pum' in linga_str or 'mas' in linga_str else
+                                      'f' if 'stri' in linga_str or 'fem' in linga_str else 'n')
+
+                # Extract lakara (for verbs)
+                if hasattr(r, 'lakara') and r.lakara is not None:
+                    analysis.lakara = str(r.lakara).lower().split('.')[-1]
+
+                # Extract purusha
+                if hasattr(r, 'purusha') and r.purusha is not None:
+                    analysis.purusha = str(r.purusha).split('.')[-1]
+
+                # Meaning from dhatu lookup
+                if analysis.dhatu:
+                    analysis.meaning_en = DHATU_MEANINGS.get(analysis.dhatu,
+                                         f"[root: {analysis.dhatu}]")
 
         except Exception as e:
-            logger.error(f"Error parsing verse {verse_id}: {e}")
-            return word_records
+            logger.debug(f"vidyut analysis failed for '{surface}': {e}")
 
-    def parse_bulk(
-        self,
-        verses: List[Dict[str, str]],
-        batch_size: int = 10
-    ) -> List[WordRecord]:
+        return analysis
+
+    def _lookup_basic_meaning(self, devanagari: str) -> Optional[str]:
+        """Basic meaning lookup without vidyut."""
+        common_words = {
+            "धर्म": "duty/righteousness",
+            "कर्म": "action/deed",
+            "आत्मन्": "self/soul",
+            "ब्रह्मन्": "Brahman/absolute",
+            "सत्य": "truth",
+            "अहिंसा": "non-violence",
+            "योग": "union/discipline",
+            "ज्ञान": "knowledge",
+            "भक्ति": "devotion",
+            "मोक्ष": "liberation",
+            "सत्त्व": "purity/goodness",
+            "रजस्": "passion/activity",
+            "तमस्": "darkness/inertia",
+            "राम": "Rama",
+            "कृष्ण": "Krishna",
+            "अर्जुन": "Arjuna",
+        }
+        return common_words.get(devanagari)
+
+    def parse_verse(self, devanagari: str, verse_id: str) -> list[WordAnalysis]:
         """
-        Parse multiple verses with progress tracking.
+        Parses every word in a verse.
 
         Args:
-            verses: List of dicts with 'verse_id' and 'devanagari' keys
-            batch_size: Number of verses per progress update
+            devanagari: Full verse text in Devanagari
+            verse_id: Verse identifier (e.g. "BG.2.47")
 
         Returns:
-            Flattened list of all WordRecords
-
-        Example:
-            >>> parser = SanskritParser()
-            >>> verses = [
-            ...     {"verse_id": "BG.1.1", "devanagari": "धर्मक्षेत्रे..."},
-            ...     {"verse_id": "BG.1.2", "devanagari": "पाण्डवाः..."}
-            ... ]
-            >>> all_words = parser.parse_bulk(verses)
+            list[WordAnalysis]: One record per word
         """
-        all_word_records = []
-
-        with tqdm(total=len(verses), desc="Parsing verses") as pbar:
-            for i, verse in enumerate(verses):
-                verse_id = verse.get("verse_id", f"unknown_{i}")
-                devanagari = verse.get("devanagari", "")
-
-                if not devanagari:
-                    logger.warning(f"Empty verse text for {verse_id}")
-                    pbar.update(1)
-                    continue
-
-                word_records = self.parse_verse(devanagari, verse_id)
-                all_word_records.extend(word_records)
-
-                if (i + 1) % batch_size == 0:
-                    pbar.update(batch_size)
-
-            # Update remaining
-            remaining = len(verses) % batch_size
-            if remaining > 0:
-                pbar.update(remaining)
-
-        logger.info(f"Total words parsed: {len(all_word_records)}")
-        return all_word_records
-
-    def identify_speaker(self, verse_context: str) -> Optional[str]:
-        """
-        Attempt to identify the speaker of a verse from surrounding context.
-
-        Args:
-            verse_context: Extended text context around the verse
-
-        Returns:
-            Character ID if identified, None otherwise
-
-        Example:
-            >>> parser = SanskritParser()
-            >>> speaker = parser.identify_speaker("अर्जुन उवाच - धर्मक्षेत्रे...")
-            >>> print(speaker)  # arjuna
-        """
-        # Simple heuristic: look for "X उवाच" (X said) pattern
         import re
+        # Split on whitespace and punctuation, keep Devanagari
+        words = re.findall(r'[\u0900-\u097F]+', devanagari)
+        return [self.parse_word(w, verse_id, i) for i, w in enumerate(words)]
 
-        try:
-            # Match "name उवाच" pattern
-            match = re.search(r'(\w+)\s+उवाच', verse_context)
-            if match:
-                speaker_name = match.group(1).lower()
-                # Map common Sanskrit names to IDs
-                speaker_map = {
-                    "अर्जुन": "arjuna",
-                    "कृष्ण": "krishna",
-                    "युधिष्ठिर": "yudhishthira",
-                    "भीम": "bhima",
-                    "व्यास": "vyasa",
-                    "संजय": "sanjaya",
-                }
-                return speaker_map.get(speaker_name)
-        except Exception as e:
-            logger.debug(f"Error identifying speaker: {e}")
+    def parse_bulk(self, verses: list, show_progress: bool = True) -> list[WordAnalysis]:
+        """
+        Parses all words from a list of VerseRecord objects.
 
+        Args:
+            verses: List of VerseRecord (from normaliser)
+            show_progress: Show tqdm progress bar
+
+        Returns:
+            list[WordAnalysis]: All word analyses
+        """
+        all_words = []
+        iterator = tqdm(verses, desc="Parsing words") if show_progress else verses
+        for verse in iterator:
+            words = self.parse_verse(verse.devanagari, verse.verse_id)
+            all_words.extend(words)
+        logger.info(f"Parsed {len(all_words):,} words from {len(verses):,} verses")
+        return all_words
+
+    def identify_speaker(self, preceding_text: str,
+                         known_chars: list[str]) -> Optional[str]:
+        """
+        Identifies the speaker of a verse from context.
+
+        Args:
+            preceding_text: Text before the verse (contains "uvāca" etc.)
+            known_chars: List of known character IDs
+
+        Returns:
+            str | None: Character ID of speaker
+        """
+        speaker_patterns = {
+            r'kṛṣṇa.*?uvāca|kṛṣṇa.*?spoke':  'krishna',
+            r'arjuna.*?uvāca|arjuna.*?spoke':  'arjuna',
+            r'rāma.*?uvāca':                    'rama',
+            r'bhīṣma.*?uvāca':                  'bhishma',
+            r'vyāsa.*?uvāca':                   'vyasa',
+            r'sañjaya.*?uvāca':                 'sanjaya',
+            r'yudhiṣṭhira.*?uvāca':             'yudhishthira',
+            r'dhṛtarāṣṭra.*?uvāca':             'dhritarashtra',
+            r'sītā.*?uvāca':                    'sita',
+            r'rāvaṇa.*?uvāca':                  'ravana',
+        }
+        import re
+        text_lower = preceding_text.lower()
+        for pattern, char_id in speaker_patterns.items():
+            if re.search(pattern, text_lower):
+                return char_id
         return None
 
-    def identify_metre(self, devanagari: str) -> Optional[str]:
+    def extract_entities(self, devanagari: str,
+                         iast: str) -> dict[str, list[str]]:
         """
-        Identify the Sanskrit metre (chandas) of a verse.
+        Extracts named entities (characters, places, weapons, herbs).
 
         Args:
             devanagari: Verse in Devanagari
+            iast: IAST romanisation
 
         Returns:
-            Metre name (Anushtubh, Trishtubh, Jagati, etc.) or None
-
-        Example:
-            >>> parser = SanskritParser()
-            >>> metre = parser.identify_metre("धर्मक्षेत्रे कुरुक्षेत्रे")
-            >>> print(metre)  # Anushtubh
+            dict: {'characters': [...], 'places': [...], 'weapons': [...]}
         """
-        # Heuristic: count syllables
-        # In Sanskrit, syllable count is preserved in text
-        # Common metres:
-        # Anushtubh: 8+8 = 16 syllables per line, 2 lines (32 total)
-        # Trishtubh: 11 syllables per line
-        # Jagati: 12 syllables per line
-        # Gayatri: 8 syllables per line
+        entities = {"characters": [], "places": [], "weapons": [], "concepts": []}
 
-        try:
-            # Count matras (syllables) - very simplified
-            # In actual Devanagari, we'd count carefully including consonant clusters
-            syllable_count = len([c for c in devanagari if c.isalpha()])
-
-            if syllable_count % 8 == 0 and syllable_count <= 16:
-                return "Anushtubh"
-            elif syllable_count % 11 == 0:
-                return "Trishtubh"
-            elif syllable_count % 12 == 0:
-                return "Jagati"
-            elif syllable_count % 8 == 0:
-                return "Gayatri"
-            else:
-                return None
-
-        except Exception as e:
-            logger.debug(f"Error identifying metre: {e}")
-            return None
-
-    def _extract_word_record(
-        self,
-        word_analysis,
-        verse_id: str,
-        position: int
-    ) -> Optional[WordRecord]:
-        """
-        Extract WordRecord from Vidyut parsing result.
-
-        Args:
-            word_analysis: Parsed word from Vidyut
-            verse_id: Parent verse ID
-            position: Word position in verse
-
-        Returns:
-            WordRecord or None if extraction fails
-        """
-        try:
-            # Extract surface form
-            surface_form = getattr(word_analysis, 'text', '')
-            if not surface_form:
-                return None
-
-            pada_id = f"{verse_id}_{position}"
-
-            # Try to extract grammatical info from Vidyut output
-            # The exact attributes depend on Vidyut version
-            dhatu = getattr(word_analysis, 'root', None)
-            stem = getattr(word_analysis, 'stem', None)
-            vibhakti = self._parse_case_num(getattr(word_analysis, 'case', None))
-            vachana = self._parse_vachana(getattr(word_analysis, 'number', None))
-            linga = self._parse_gender(getattr(word_analysis, 'gender', None))
-            purusha = getattr(word_analysis, 'person', None)
-            lakara = self._parse_tense(getattr(word_analysis, 'tense', None))
-            meaning_en = getattr(word_analysis, 'meaning', None)
-
-            word_rec = WordRecord(
-                pada_id=pada_id,
-                verse_id=verse_id,
-                position=position,
-                surface_form=surface_form,
-                dhatu=dhatu,
-                stem=stem,
-                vibhakti=vibhakti,
-                vachana=vachana,
-                linga=linga,
-                purusha=purusha,
-                lakara=lakara,
-                meaning_en=meaning_en,
-            )
-
-            return word_rec
-
-        except Exception as e:
-            logger.debug(f"Error extracting word record for {verse_id}_{position}: {e}")
-            return None
-
-    @staticmethod
-    def _parse_case_num(case_str: Optional[str]) -> Optional[int]:
-        """Convert case string to vibhakti number (1-8)."""
-        if not case_str:
-            return None
-
-        case_map = {
-            "nominative": 1,
-            "accusative": 2,
-            "instrumental": 3,
-            "dative": 4,
-            "ablative": 5,
-            "genitive": 6,
-            "locative": 7,
-            "vocative": 8,
+        # Known entity lists (expanded as corpus grows)
+        characters_sa = {
+            "राम": "rama", "कृष्ण": "krishna", "अर्जुन": "arjuna",
+            "भीम": "bhima", "युधिष्ठिर": "yudhishthira",
+            "दुर्योधन": "duryodhana", "भीष्म": "bhishma",
+            "द्रोण": "drona", "कर्ण": "karna",
+            "सीता": "sita", "रावण": "ravana",
+            "हनुमान": "hanuman", "लक्ष्मण": "lakshmana",
+            "विष्णु": "vishnu", "शिव": "shiva",
+            "ब्रह्मा": "brahma", "इन्द्र": "indra",
+            "अग्नि": "agni", "वायु": "vayu",
+            "वरुण": "varuna", "यम": "yama",
         }
-        return case_map.get(case_str.lower())
-
-    @staticmethod
-    def _parse_vachana(number_str: Optional[str]) -> Optional[str]:
-        """Convert number string to vachana."""
-        if not number_str:
-            return None
-
-        number_map = {
-            "singular": "Singular",
-            "dual": "Dual",
-            "plural": "Plural",
+        places_sa = {
+            "कुरुक्षेत्र": "kurukshetra", "हस्तिनापुर": "hastinapura",
+            "अयोध्या": "ayodhya", "लङ्का": "lanka",
+            "द्वारका": "dwaraka", "मथुरा": "mathura",
+            "काशी": "kashi", "प्रयाग": "prayaga",
         }
-        return number_map.get(number_str.lower())
-
-    @staticmethod
-    def _parse_gender(gender_str: Optional[str]) -> Optional[str]:
-        """Convert gender string to linga."""
-        if not gender_str:
-            return None
-
-        gender_map = {
-            "masculine": "Masculine",
-            "feminine": "Feminine",
-            "neuter": "Neuter",
+        weapons_sa = {
+            "गाण्डीव": "gandiva", "सुदर्शन": "sudarshana",
+            "पाशुपात": "pashupata", "ब्रह्मास्त्र": "brahmastra",
         }
-        return gender_map.get(gender_str.lower())
-
-    @staticmethod
-    def _parse_tense(tense_str: Optional[str]) -> Optional[str]:
-        """Convert tense string to lakara."""
-        if not tense_str:
-            return None
-
-        tense_map = {
-            "present": "Present",
-            "past": "Past",
-            "future": "Future",
-            "perfect": "Perfect",
-            "imperfect": "Imperfect",
+        concepts_sa = {
+            "धर्म": "dharma", "कर्म": "karma", "मोक्ष": "moksha",
+            "आत्मन्": "atman", "ब्रह्मन्": "brahman",
+            "योग": "yoga", "ज्ञान": "jnana", "भक्ति": "bhakti",
         }
-        return tense_map.get(tense_str.lower())
+
+        for sa_name, entity_id in characters_sa.items():
+            if sa_name in devanagari:
+                entities["characters"].append(entity_id)
+        for sa_name, entity_id in places_sa.items():
+            if sa_name in devanagari:
+                entities["places"].append(entity_id)
+        for sa_name, entity_id in weapons_sa.items():
+            if sa_name in devanagari:
+                entities["weapons"].append(entity_id)
+        for sa_name, entity_id in concepts_sa.items():
+            if sa_name in devanagari:
+                entities["concepts"].append(entity_id)
+
+        return {k: list(set(v)) for k, v in entities.items()}
