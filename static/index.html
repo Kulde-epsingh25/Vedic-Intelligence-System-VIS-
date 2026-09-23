@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vedic Intelligence System (VIS) — Sacred Sanskrit AI & Science Bridge</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Inter:wght@300;400;500;600;700&family=Noto+Sans+Devanagari:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🕉️</text></svg>">
+</head>
+<body>
+  <!-- Background Glow & Stars -->
+  <div class="cosmos-bg">
+    <div class="glow-orb orb-1"></div>
+    <div class="glow-orb orb-2"></div>
+    <div class="mandala-bg"></div>
+  </div>
+
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="brand">
+        <span class="om-symbol">ॐ</span>
+        <div>
+          <h1 class="brand-title">VEDIC INTELLIGENCE SYSTEM</h1>
+          <p class="brand-tagline">AI Semantic Search • Sanskrit Grammar • Modern Science Bridge</p>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="stats-badge" id="stats-badge">
+          <span class="pulse-dot"></span>
+          <span id="stats-text">Connecting to Knowledge Base...</span>
+        </div>
+        <a href="/docs" target="_blank" class="api-docs-btn" title="Open Swagger OpenAPI Documentation">
+          <span>⚡ API Docs</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Navigation Bar -->
+  <nav class="main-nav">
+    <div class="nav-container">
+      <button class="nav-btn active" data-tab="ai-scholar">
+        <span class="nav-icon">🔮</span>
+        <span>AI Scholar (RAG)</span>
+      </button>
+      <button class="nav-btn" data-tab="verse-reader">
+        <span class="nav-icon">📖</span>
+        <span>Sacred Verses</span>
+      </button>
+      <button class="nav-btn" data-tab="semantic-search">
+        <span class="nav-icon">🔍</span>
+        <span>Semantic Search</span>
+      </button>
+      <button class="nav-btn" data-tab="character-codex">
+        <span class="nav-icon">👥</span>
+        <span>Character Codex</span>
+      </button>
+      <button class="nav-btn" data-tab="science-bridge">
+        <span class="nav-icon">🌌</span>
+        <span>Science Bridge</span>
+      </button>
+      <button class="nav-btn" data-tab="knowledge-graph">
+        <span class="nav-icon">🕸️</span>
+        <span>Knowledge Graph</span>
+      </button>
+    </div>
+  </nav>
+
+  <!-- Main Container -->
+  <main class="main-content">
+
+    <!-- TAB 1: AI SCHOLAR (RAG) -->
+    <section id="tab-ai-scholar" class="tab-panel active">
+      <div class="panel-hero">
+        <h2>Ask the Vedic Intelligence Scholar</h2>
+        <p>Inquire in natural English or Sanskrit. VIS cross-references ancient shlokas, Paninian grammar, and contemporary scientific literature to deliver cited answers.</p>
+      </div>
+
+      <!-- Quick prompts -->
+      <div class="prompt-chips-wrap">
+        <span class="chips-label">Sample Inquiries:</span>
+        <div class="prompt-chips">
+          <button class="chip" data-q="What does Krishna teach about duty without attachment to fruits in the Gita?">Karma Yoga & Detachment</button>
+          <button class="chip" data-q="How does Patanjali define the cessation of mental fluctuations (citta-vritti-nirodha)?">Yoga & Mind Mastery</button>
+          <button class="chip" data-q="Explain the ancient Vedic concept of Paramanu and its connection to Quantum Physics">Paramanu & Quantum Physics</button>
+          <button class="chip" data-q="What does the Nasadiya Sukta reveal about the creation of the Universe?">Cosmic Creation Hymn</button>
+          <button class="chip" data-q="How does Ayurveda explain the tripartite biological energies (Tridosha)?">Tridosha Biology</button>
+        </div>
+      </div>
+
+      <!-- Query Box -->
+      <div class="query-box-card">
+        <div class="input-wrapper">
+          <textarea id="ai-query-input" placeholder="Type any philosophical, cosmological, or scientific question about ancient Indian texts..." rows="3"></textarea>
+          <button id="btn-submit-ask" class="primary-btn">
+            <span>Inquire</span>
+            <span class="btn-arrow">➔</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Result Card -->
+      <div id="ai-result-container" class="result-container hidden">
+        <div class="result-header">
+          <div class="result-title-group">
+            <span class="badge confidence-badge" id="ai-confidence">Confidence: 95%</span>
+            <span class="badge model-badge" id="ai-model">Vedic-RAG Core</span>
+          </div>
+          <button id="btn-speak-answer" class="icon-action-btn" title="Pronounce Sanskrit verse">🔊 Recite</button>
+        </div>
+
+        <div class="result-body">
+          <div class="scholarly-answer" id="ai-answer-text"></div>
+
+          <!-- Cited Shloka Showcase -->
+          <div class="shloka-citation-card" id="shloka-citation-box">
+            <div class="shloka-id-tag" id="cited-verse-id">BG.2.47</div>
+            <div class="devanagari-text" id="cited-devanagari"></div>
+            <div class="iast-text" id="cited-iast"></div>
+            <div class="translation-text" id="cited-translation"></div>
+          </div>
+
+          <!-- Modern Science Parallel Section -->
+          <div id="science-parallel-box" class="science-parallel-card hidden">
+            <div class="science-header">
+              <span class="atom-icon">⚛️</span>
+              <h4>Modern Scientific Correlation</h4>
+              <span class="domain-tag" id="parallel-domain">Physics</span>
+            </div>
+            <h5 id="parallel-title" class="parallel-title"></h5>
+            <div class="parallel-ref" id="parallel-ref"></div>
+            <p id="parallel-desc" class="parallel-desc"></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: SACRED VERSE EXPLORER -->
+    <section id="tab-verse-reader" class="tab-panel">
+      <div class="panel-hero">
+        <h2>Sacred Sanskrit Canon (Śloka Explorer)</h2>
+        <p>Explore authoritative verses with full Devanagari calligraphy, IAST transliteration, English exposition, and word-by-word Paninian grammatical breakdown.</p>
+      </div>
+
+      <!-- Filters -->
+      <div class="filter-bar">
+        <div class="filter-group">
+          <label>Source Canon:</label>
+          <select id="verse-source-filter">
+            <option value="">All Texts (Sarva-Grantha)</option>
+            <option value="BG">Bhagavad Gita (BG)</option>
+            <option value="YS">Patanjali Yoga Sutras (YS)</option>
+            <option value="ISA">Isha Upanishad (ISA)</option>
+            <option value="RV">Rigveda (RV)</option>
+            <option value="CS">Charaka Samhita (CS)</option>
+            <option value="SS">Surya Siddhanta (SS)</option>
+          </select>
+        </div>
+        <div class="verse-counter" id="verse-count-display">Showing 0 verses</div>
+      </div>
+
+      <!-- Verses Grid -->
+      <div class="verses-grid" id="verses-container">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- TAB 3: SEMANTIC SEARCH -->
+    <section id="tab-semantic-search" class="tab-panel">
+      <div class="panel-hero">
+        <h2>Semantic Search (Anveṣaṇa)</h2>
+        <p>Search by meaning across the entire Sanskrit corpus. Matches conceptual themes even when words differ.</p>
+      </div>
+
+      <div class="search-input-box">
+        <input type="text" id="search-query-input" placeholder="Search by meaning: e.g. 'eternal soul', 'equanimity in battle', 'nature of cosmos'...">
+        <button id="btn-submit-search" class="primary-btn">Search</button>
+      </div>
+
+      <div class="search-results-list" id="search-results-container">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- TAB 4: CHARACTER CODEX -->
+    <section id="tab-character-codex" class="tab-panel">
+      <div class="panel-hero">
+        <h2>Character Codex & Lineage</h2>
+        <p>Profiles of key protagonists, seers, mathematicians, and avatāras across Indian itihāsas and shāstras.</p>
+      </div>
+
+      <div class="characters-grid" id="characters-container">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- TAB 5: SCIENCE BRIDGE -->
+    <section id="tab-science-bridge" class="tab-panel">
+      <div class="panel-hero">
+        <h2>Vedic ⇄ Modern Science Knowledge Bridge</h2>
+        <p>Direct ontological mappings between ancient Sanskrit treatises and peer-reviewed 21st-century scientific publications.</p>
+      </div>
+
+      <div class="science-grid" id="science-links-container">
+        <!-- Rendered dynamically -->
+      </div>
+    </section>
+
+    <!-- TAB 6: KNOWLEDGE GRAPH -->
+    <section id="tab-knowledge-graph" class="tab-panel">
+      <div class="panel-hero">
+        <h2>Vedic Ontology Graph Network</h2>
+        <p>Interactive graph visualization mapping the relationships between Sacred Texts, Philosophies, Characters, Concepts, and Scientific Disciplines.</p>
+      </div>
+
+      <div class="graph-viewport-card">
+        <div class="graph-legend">
+          <span class="legend-item"><span class="legend-dot dot-text"></span> Text</span>
+          <span class="legend-item"><span class="legend-dot dot-char"></span> Character</span>
+          <span class="legend-item"><span class="legend-dot dot-concept"></span> Concept</span>
+          <span class="legend-item"><span class="legend-dot dot-science"></span> Science Domain</span>
+        </div>
+        <canvas id="knowledge-graph-canvas" width="1100" height="580"></canvas>
+        <div class="graph-hint">💡 Hover and drag nodes to explore connections and ontologies.</div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Word Grammar Modal -->
+  <div id="grammar-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-word-title">Word Analysis</h3>
+        <button id="modal-close" class="modal-close-btn">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-grammar-content">
+        <!-- Filled dynamically -->
+      </div>
+    </div>
+  </div>
+
+  <footer class="app-footer">
+    <div class="footer-inner">
+      <div>🕉️ <strong>Vedic Intelligence System (VIS)</strong> — Free and open to all seekers of knowledge.</div>
+      <div class="footer-links">
+        <a href="/docs" target="_blank">OpenAPI Specs</a>
+        <span>•</span>
+        <a href="/health" target="_blank">Health</a>
+        <span>•</span>
+        <a href="/stats" target="_blank">Corpus Stats</a>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
